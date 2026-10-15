@@ -3,6 +3,7 @@ package com.aaforge.shesafe.ui.screens
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -20,11 +21,16 @@ import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalFocusManager
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.aaforge.shesafe.R
 import com.aaforge.shesafe.data.StoredChatSession
 import com.aaforge.shesafe.parser.ParsedAgentTurn
 import com.aaforge.shesafe.searchtool.ScrapedWebSource
@@ -58,13 +64,24 @@ fun ChatScreen(
     var isInputFocused by remember { mutableStateOf(false) }
     val drawerState = rememberDrawerState(initialValue = DrawerValue.Closed)
     val scope = rememberCoroutineScope()
+    val focusManager = LocalFocusManager.current
+    val isKeyboardOpen = WindowInsets.ime.getBottom(LocalDensity.current) > 0
+
+    LaunchedEffect(isKeyboardOpen) {
+        if (!isKeyboardOpen && isInputFocused) {
+            focusManager.clearFocus()
+            isInputFocused = false
+        }
+    }
+
+    val showCenterBranding = messages.isEmpty() && !isInputFocused && input.isEmpty()
 
     ModalNavigationDrawer(
         drawerState = drawerState,
         drawerContent = {
             ModalDrawerSheet(drawerContainerColor = ObsidianColors.DeepObsidianCanvas) {
                 Column(modifier = Modifier.fillMaxHeight().width(280.dp).background(ObsidianColors.DeepObsidianCanvas).padding(18.dp)) {
-                    Text("PRIVATE ARCHIVE", color = ObsidianColors.BrandBronze, fontWeight = FontWeight.SemiBold, fontSize = 11.sp, letterSpacing = 2.sp)
+                    Text("MELLA ARCHIVE", color = ObsidianColors.BrandBronze, fontWeight = FontWeight.SemiBold, fontSize = 11.sp, letterSpacing = 2.sp)
                     Spacer(modifier = Modifier.height(14.dp))
                     Box(
                         modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(8.dp))
@@ -94,7 +111,7 @@ fun ChatScreen(
         Column(modifier = Modifier.fillMaxSize().background(ObsidianColors.Background)) {
             Box(modifier = Modifier.fillMaxWidth().padding(top = 20.dp, bottom = 12.dp, start = 20.dp, end = 20.dp)) {
                 Text("≡", color = ObsidianColors.BrandBronze, fontSize = 22.sp, modifier = Modifier.align(Alignment.CenterStart).clickable { scope.launch { drawerState.open() } })
-                Text("she safe", color = ObsidianColors.BrandBronze, fontSize = 16.sp, fontFamily = FontFamily.Serif, fontWeight = FontWeight.Medium, letterSpacing = 2.5.sp, modifier = Modifier.align(Alignment.Center))
+                Text("mella", color = ObsidianColors.BrandBronze, fontSize = 17.sp, fontFamily = FontFamily.Serif, fontWeight = FontWeight.Medium, letterSpacing = 3.sp, modifier = Modifier.align(Alignment.Center))
                 Box(
                     modifier = Modifier.align(Alignment.CenterEnd).clip(RoundedCornerShape(6.dp)).background(ObsidianColors.SurfaceCard)
                         .border(1.dp, ObsidianColors.SurfaceBorder, RoundedCornerShape(6.dp)).clickable { onStartVoiceCall() }.padding(horizontal = 10.dp, vertical = 5.dp)
@@ -105,12 +122,22 @@ fun ChatScreen(
 
             Box(modifier = Modifier.weight(1f).fillMaxWidth()) {
                 this@Column.AnimatedVisibility(
-                    visible = messages.isEmpty() && !isInputFocused && input.isEmpty(),
+                    visible = showCenterBranding,
                     enter = fadeIn(),
                     exit = fadeOut(),
                     modifier = Modifier.align(Alignment.Center)
                 ) {
-                    Column(horizontalAlignment = Alignment.CenterHorizontally, modifier = Modifier.padding(horizontal = 28.dp)) {
+                    Column(
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                        modifier = Modifier.padding(horizontal = 28.dp).offset(y = 14.dp)
+                    ) {
+                        Image(
+                            painter = painterResource(id = R.drawable.logo2),
+                            contentDescription = "Mella Logo",
+                            modifier = Modifier.size(118.dp),
+                            contentScale = ContentScale.Fit
+                        )
+                        Spacer(modifier = Modifier.height(18.dp))
                         Text(
                             text = "Share whatever you want!",
                             style = TextStyle(
@@ -171,7 +198,11 @@ fun ChatScreen(
                 UpArrowSendButton(
                     canSend = input.isNotBlank(),
                     isStreaming = isStreaming,
-                    onSendClick = { onSendMessage(input.trim()); input = "" },
+                    onSendClick = {
+                        onSendMessage(input.trim())
+                        input = ""
+                        focusManager.clearFocus()
+                    },
                     onStopClick = onStopStreaming
                 )
             }
