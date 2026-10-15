@@ -22,6 +22,7 @@ import java.util.UUID
 class MainActivity : ComponentActivity() {
     private val voiceClient = LiveVoiceStreamClient()
     private var activeStreamJob: Job? = null
+    private var activeVoiceJob: Job? = null
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -35,7 +36,9 @@ class MainActivity : ComponentActivity() {
                 val messages = remember { mutableStateListOf<UiChatMessage>() }
                 var isStreaming by remember { mutableStateOf(false) }
                 var inVoiceMode by remember { mutableStateOf(false) }
-                var amplitude by remember { mutableFloatStateOf(0f) }
+                var voiceUiState by remember { mutableStateOf(VoiceUiState.USER_LISTENING) }
+                var inputWave by remember { mutableFloatStateOf(0f) }
+                var outputWave by remember { mutableFloatStateOf(0f) }
 
                 fun persistCurrentState() {
                     val records = messages.map {
@@ -50,10 +53,17 @@ class MainActivity : ComponentActivity() {
                 }
 
                 if (inVoiceMode) {
-                    VoiceCallScreen(amplitude = amplitude) {
-                        voiceClient.stopVoiceEngine()
-                        inVoiceMode = false
-                    }
+                    VoiceCallScreen(
+                        uiState = voiceUiState,
+                        inputLevel = inputWave,
+                        outputLevel = outputWave,
+                        onEndCall = {
+                            voiceClient.stopVoiceEngine()
+                            activeVoiceJob?.cancel()
+                            inVoiceMode = false
+                            persistCurrentState()
+                        }
+                    )
                 } else {
                     ChatScreen(
                         messages = messages,
@@ -61,17 +71,13 @@ class MainActivity : ComponentActivity() {
                         activeSessionId = activeSessionId,
                         isStreaming = isStreaming,
                         onNewSession = {
-                            activeStreamJob?.cancel()
-                            isStreaming = false
+                            activeStreamJob?.cancel(); isStreaming = false
                             activeSessionId = UUID.randomUUID().toString()
-                            activeChatTitle = "New Safe Chat"
-                            messages.clear()
+                            activeChatTitle = "New Safe Chat"; messages.clear()
                         },
                         onSelectSession = { session ->
-                            activeStreamJob?.cancel()
-                            isStreaming = false
-                            activeSessionId = session.sessionId
-                            activeChatTitle = session.chatName
+                            activeStreamJob?.cancel(); isStreaming = false
+                            activeSessionId = session.sessionId; activeChatTitle = session.chatName
                             messages.clear()
                             session.messages.forEach { rec ->
                                 if (rec.isUser) messages.add(UiChatMessage(isUser = true, text = rec.rawContent))
@@ -79,15 +85,12 @@ class MainActivity : ComponentActivity() {
                             }
                         },
                         onStopStreaming = {
-                            activeStreamJob?.cancel()
-                            activeStreamJob = null
+                            activeStreamJob?.cancel(); activeStreamJob = null
                             if (messages.isNotEmpty() && !messages.last().isUser) {
-                                val lastMsg = messages.last()
-                                val stoppedTurn = lastMsg.agentTurn?.copy(isCurrentlyThinking = false)
-                                messages[messages.lastIndex] = lastMsg.copy(agentTurn = stoppedTurn)
+                                val last = messages.last()
+                                messages[messages.lastIndex] = last.copy(agentTurn = last.agentTurn?.copy(isCurrentlyThinking = false))
                             }
-                            isStreaming = false
-                            persistCurrentState()
+                            isStreaming = false; persistCurrentState()
                         },
                         onSendMessage = { prompt ->
                             activeStreamJob?.cancel()
@@ -116,8 +119,7 @@ class MainActivity : ComponentActivity() {
                                             messages[agentIdx] = messages[agentIdx].copy(rawXml = rawXml, agentTurn = parsed)
                                         }
                                         is StreamFrame.Done, is StreamFrame.Error -> {
-                                            isStreaming = false
-                                            persistCurrentState()
+                                            isStreaming = false; persistCurrentState()
                                         }
                                     }
                                 }
@@ -126,7 +128,22 @@ class MainActivity : ComponentActivity() {
                         onStartVoiceCall = {
                             if (ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED) {
                                 inVoiceMode = true
-                                lifecycleScope.launch { voiceClient.startVoiceEngine { amplitude = it } }
+                                val history = messages.map { ChatHistoryTurn(if (it.isUser) "user" else "model", if (it.isUser) it.text else it.rawXml) }
+                                activeVoiceJob = lifecycleScope.launch {
+                                    voiceClient.startLiveSession(
+                                        history = history,
+                                        onStateChange = { voiceUiState = it },
+                                        onInputLevel = { inputWave = it },
+                                        onOutputLevel = { outputWave = it },
+                                        onTranscriptTurn = { isUser, content ->
+                                            runOnUiThread {
+                                                if (isUser) messages.add(UiChatMessage(isUser = true, text = content))
+                                                else messages.add(UiChatMessage(isUser = false, rawXml = content, agentTurn = XmlBlockParser.parseXmlStream(content)))
+                                                persistCurrentState()
+                                            }
+                                        }
+                                    )
+                                }
                             } else audioPermissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
                         }
                     )
