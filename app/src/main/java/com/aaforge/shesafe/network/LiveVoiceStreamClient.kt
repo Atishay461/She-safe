@@ -84,16 +84,13 @@ class LiveVoiceStreamClient {
                 if (rollingPreRoll.size >= 7) rollingPreRoll.removeFirst()
                 rollingPreRoll.addLast(frameCopy)
                 if (!isMicMuted && rawRms >= startThreshold) {
-                    hasSpoken = true
-                    lastVoiceMs = now
+                    hasSpoken = true; lastVoiceMs = now
                     rollingPreRoll.forEach { speechAccumulator.write(it) }
                     rollingPreRoll.clear()
                 }
             } else {
                 speechAccumulator.write(frameCopy)
-                if (!isMicMuted && rawRms >= sustainThreshold) {
-                    lastVoiceMs = now
-                }
+                if (!isMicMuted && rawRms >= sustainThreshold) lastVoiceMs = now
             }
 
             val silenceMs = now - lastVoiceMs
@@ -113,11 +110,10 @@ class LiveVoiceStreamClient {
                     val synthWav = WavAudioHelper.synthesizeToWavBytes(context, ttsEngine, replyText)
                     if (synthWav != null && active) {
                         onStateChange(VoiceUiState.MODEL_SPEAKING)
-                        val bargeInBytes = playAndMonitorBargeIn(synthWav, rec, micBuf, startThreshold, onOutputLevel)
+                        val bargeInBytes = playSmoothWithParallelBargeIn(synthWav, rec, startThreshold, onOutputLevel)
                         onOutputLevel(0f)
                         if (bargeInBytes != null && active) {
-                            hasSpoken = true
-                            lastVoiceMs = System.currentTimeMillis()
+                            hasSpoken = true; lastVoiceMs = System.currentTimeMillis()
                             speechAccumulator.write(bargeInBytes)
                         }
                     }
@@ -127,32 +123,67 @@ class LiveVoiceStreamClient {
         }
     }
 
-    private fun playAndMonitorBargeIn(wav: ByteArray, rec: AudioRecord, micBuf: ByteArray, bargeThreshold: Float, onOut: (Float) -> Unit): ByteArray? {
+    private suspend fun playSmoothWithParallelBargeIn(
+        wav: ByteArray,
+        rec: AudioRecord,
+        bargeThreshold: Float,
+        onOut: (Float) -> Unit
+    ): ByteArray? = coroutineScope {
         val sr = WavAudioHelper.readWavSampleRate(wav)
-        val minBuf = AudioTrack.getMinBufferSize(sr, AudioFormat.CHANNEL_OUT_MONO, AudioFormat.ENCODING_PCM_16BIT).coerceAtLeast(4096)
+        val totalPcmBytes = (wav.size - 44).coerceAtLeast(0)
+        if (totalPcmBytes == 0) return@coroutineScope null
+        val totalFrames = totalPcmBytes / 2
+        val minBuf = AudioTrack.getMinBufferSize(sr, AudioFormat.CHANNEL_OUT_MONO, AudioFormat.ENCODING_PCM_16BIT).coerceAtLeast(8192)
         val trk = AudioTrack.Builder()
-            .setAudioAttributes(AudioAttributes.Builder().setUsage(AudioAttributes.USAGE_VOICE_COMMUNICATION).setContentType(AudioAttributes.CONTENT_TYPE_SPEECH).build())
+            .setAudioAttributes(AudioAttributes.Builder().setUsage(AudioAttributes.USAGE_MEDIA).setContentType(AudioAttributes.CONTENT_TYPE_SPEECH).build())
             .setAudioFormat(AudioFormat.Builder().setEncoding(AudioFormat.ENCODING_PCM_16BIT).setSampleRate(sr).setChannelMask(AudioFormat.CHANNEL_OUT_MONO).build())
-            .setBufferSizeInBytes(minBuf).build()
+            .setBufferSizeInBytes(minBuf * 4)
+            .setTransferMode(AudioTrack.MODE_STREAM)
+            .build()
         activePlayer = trk; trk.play()
-        var off = 44; var bargeFrames = 0
+
+        @Volatile var interrupted = false
         val capturedInterrupt = ByteArrayOutputStream()
-        while (active && off < wav.size) {
-            val len = (wav.size - off).coerceAtMost(1600)
-            onOut(WavAudioHelper.calcRms(wav, off, len))
-            trk.write(wav, off, len)
-            off += len
-            val r = rec.read(micBuf, 0, micBuf.size)
-            if (!isMicMuted && r > 0) {
-                if (WavAudioHelper.calcRms(micBuf, 0, r) >= (bargeThreshold + 0.035f)) {
-                    bargeFrames++
-                    capturedInterrupt.write(micBuf, 0, r)
-                    if (bargeFrames >= 3) { trk.pause(); trk.flush(); break }
-                } else { bargeFrames = 0; capturedInterrupt.reset() }
+
+        val writerJob = launch(Dispatchers.IO) {
+            var off = 44
+            while (isActive && active && !interrupted && off < wav.size) {
+                val len = (wav.size - off).coerceAtMost(8192)
+                val written = trk.write(wav, off, len)
+                if (written <= 0) break
+                off += written
             }
         }
+
+        val monitorJob = launch(Dispatchers.IO) {
+            val mBuf = ByteArray(1600)
+            var bargeFrames = 0
+            while (isActive && active && !interrupted) {
+                val head = trk.playbackHeadPosition
+                if (head >= totalFrames && !writerJob.isActive) break
+                val bytePos = (44 + head * 2).coerceIn(44, (wav.size - 1024).coerceAtLeast(44))
+                val rmsLen = (wav.size - bytePos).coerceAtMost(1024)
+                onOut(if (rmsLen > 0) WavAudioHelper.calcRms(wav, bytePos, rmsLen) else 0f)
+
+                val r = rec.read(mBuf, 0, mBuf.size)
+                if (!isMicMuted && r > 0) {
+                    if (WavAudioHelper.calcRms(mBuf, 0, r) >= (bargeThreshold + 0.045f)) {
+                        bargeFrames++
+                        capturedInterrupt.write(mBuf, 0, r)
+                        if (bargeFrames >= 4) {
+                            interrupted = true
+                            runCatching { trk.pause(); trk.flush() }
+                            writerJob.cancel()
+                            break
+                        }
+                    } else { bargeFrames = 0; capturedInterrupt.reset() }
+                }
+            }
+        }
+
+        writerJob.join(); monitorJob.join()
         runCatching { trk.stop(); trk.release() }; activePlayer = null
-        return if (bargeFrames >= 3) capturedInterrupt.toByteArray() else null
+        if (interrupted) capturedInterrupt.toByteArray() else null
     }
 
     private fun sendVoiceTurnToCloudflare(wavBytes: ByteArray, history: List<ChatHistoryTurn>): String {
