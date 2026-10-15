@@ -35,6 +35,9 @@ data class EvaluationMeta(
 
 data class ParsedAgentTurn(
     val searchQueryTrigger: String? = null,
+    val thinkingText: String? = null,
+    val isCurrentlyThinking: Boolean = false,
+    val interceptedChatName: String? = null,
     val evaluation: EvaluationMeta? = null,
     val blocks: List<XmlBlockNode> = emptyList()
 )

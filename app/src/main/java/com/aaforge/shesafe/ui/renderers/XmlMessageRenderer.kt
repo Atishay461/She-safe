@@ -18,6 +18,11 @@ import com.aaforge.shesafe.ui.theme.ObsidianColors
 @Composable
 fun XmlMessageRenderer(turn: ParsedAgentTurn, modifier: Modifier = Modifier) {
     Column(modifier = modifier.fillMaxWidth()) {
+        ThinkingPulseRenderer(
+            thinkingText = turn.thinkingText,
+            isCurrentlyThinking = turn.isCurrentlyThinking
+        )
+
         turn.evaluation?.let { eval ->
             val evalColor = when (eval.severity) {
                 "CRITICAL", "HIGH" -> ObsidianColors.StatusRed
@@ -26,7 +31,7 @@ fun XmlMessageRenderer(turn: ParsedAgentTurn, modifier: Modifier = Modifier) {
             }
             Box(
                 modifier = Modifier
-                    .padding(bottom = 8.dp)
+                    .padding(bottom = 8.dp, top = 4.dp)
                     .clip(RoundedCornerShape(6.dp))
                     .background(evalColor.copy(alpha = 0.12f))
                     .border(1.dp, evalColor.copy(alpha = 0.4f), RoundedCornerShape(6.dp))
@@ -40,6 +45,7 @@ fun XmlMessageRenderer(turn: ParsedAgentTurn, modifier: Modifier = Modifier) {
                 )
             }
         }
+
         turn.blocks.forEach { block ->
             when (block) {
                 is XmlBlockNode.Paragraph -> ColoredBoldTextRenderer(spans = block.spans, modifier = Modifier.padding(vertical = 4.dp))

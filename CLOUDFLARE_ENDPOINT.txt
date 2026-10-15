@@ -1,0 +1,6 @@
+# SHESAFE CLOUDFLARE BACKEND LINK CONFIGURATION
+# GitHub non-empty tracking file.
+# Paste your live Cloudflare Gateway / Tunnel URL in:
+# app/src/main/java/com/aaforge/shesafe/core/CloudflareLinkConfig.kt
+
+ACTIVE_CLOUDFLARE_URL=https://shesafe-backend.your-cloudflare-domain.com
