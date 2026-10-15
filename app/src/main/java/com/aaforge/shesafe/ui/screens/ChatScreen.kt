@@ -1,5 +1,6 @@
 package com.aaforge.shesafe.ui.screens
 
+import androidx.activity.compose.BackHandler
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
@@ -7,6 +8,7 @@ import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -21,13 +23,16 @@ import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalFocusManager
+import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.aaforge.shesafe.R
@@ -65,12 +70,26 @@ fun ChatScreen(
     val drawerState = rememberDrawerState(initialValue = DrawerValue.Closed)
     val scope = rememberCoroutineScope()
     val focusManager = LocalFocusManager.current
-    val isKeyboardOpen = WindowInsets.ime.getBottom(LocalDensity.current) > 0
+    val keyboardController = LocalSoftwareKeyboardController.current
+    val imeBottom = WindowInsets.ime.getBottom(LocalDensity.current)
 
-    LaunchedEffect(isKeyboardOpen) {
-        if (!isKeyboardOpen && isInputFocused) {
-            focusManager.clearFocus()
-            isInputFocused = false
+    fun dismissPromptFocus() {
+        keyboardController?.hide()
+        focusManager.clearFocus(force = true)
+        isInputFocused = false
+    }
+
+    BackHandler(enabled = isInputFocused) {
+        dismissPromptFocus()
+    }
+
+    var wasKeyboardOpen by remember { mutableStateOf(false) }
+    LaunchedEffect(imeBottom) {
+        if (imeBottom > 0) {
+            wasKeyboardOpen = true
+        } else if (wasKeyboardOpen) {
+            wasKeyboardOpen = false
+            dismissPromptFocus()
         }
     }
 
@@ -86,7 +105,7 @@ fun ChatScreen(
                     Box(
                         modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(8.dp))
                             .background(ObsidianColors.SurfaceElevated).border(1.dp, ObsidianColors.SurfaceBorder, RoundedCornerShape(8.dp))
-                            .clickable { onNewSession(); scope.launch { drawerState.close() } }.padding(vertical = 12.dp, horizontal = 14.dp)
+                            .clickable { dismissPromptFocus(); onNewSession(); scope.launch { drawerState.close() } }.padding(vertical = 12.dp, horizontal = 14.dp)
                     ) {
                         Text("+  New Confidential Session", color = ObsidianColors.TextPrimary, fontWeight = FontWeight.Medium, fontSize = 13.sp)
                     }
@@ -98,7 +117,7 @@ fun ChatScreen(
                                 modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(6.dp))
                                     .background(if (isSelected) ObsidianColors.SurfaceElevated else Color.Transparent)
                                     .border(1.dp, if (isSelected) ObsidianColors.SurfaceBorder else Color.Transparent, RoundedCornerShape(6.dp))
-                                    .clickable { onSelectSession(session); scope.launch { drawerState.close() } }.padding(11.dp)
+                                    .clickable { dismissPromptFocus(); onSelectSession(session); scope.launch { drawerState.close() } }.padding(11.dp)
                             ) {
                                 Text(session.chatName, color = if (isSelected) ObsidianColors.TextPrimary else ObsidianColors.TextSecondary, fontSize = 13.sp, maxLines = 1)
                             }
@@ -109,43 +128,41 @@ fun ChatScreen(
         }
     ) {
         Column(modifier = Modifier.fillMaxSize().background(ObsidianColors.Background)) {
-            Box(modifier = Modifier.fillMaxWidth().padding(top = 20.dp, bottom = 12.dp, start = 20.dp, end = 20.dp)) {
-                Text("≡", color = ObsidianColors.BrandBronze, fontSize = 22.sp, modifier = Modifier.align(Alignment.CenterStart).clickable { scope.launch { drawerState.open() } })
+            Box(
+                modifier = Modifier.fillMaxWidth().padding(top = 20.dp, bottom = 12.dp, start = 20.dp, end = 20.dp)
+                    .pointerInput(Unit) { detectTapGestures(onTap = { dismissPromptFocus() }) }
+            ) {
+                Text("≡", color = ObsidianColors.BrandBronze, fontSize = 22.sp, modifier = Modifier.align(Alignment.CenterStart).clickable { dismissPromptFocus(); scope.launch { drawerState.open() } })
                 Text("mella", color = ObsidianColors.BrandBronze, fontSize = 17.sp, fontFamily = FontFamily.Serif, fontWeight = FontWeight.Medium, letterSpacing = 3.sp, modifier = Modifier.align(Alignment.Center))
                 Box(
                     modifier = Modifier.align(Alignment.CenterEnd).clip(RoundedCornerShape(6.dp)).background(ObsidianColors.SurfaceCard)
-                        .border(1.dp, ObsidianColors.SurfaceBorder, RoundedCornerShape(6.dp)).clickable { onStartVoiceCall() }.padding(horizontal = 10.dp, vertical = 5.dp)
+                        .border(1.dp, ObsidianColors.SurfaceBorder, RoundedCornerShape(6.dp)).clickable { dismissPromptFocus(); onStartVoiceCall() }.padding(horizontal = 10.dp, vertical = 5.dp)
                 ) {
                     Text("LIVE AUDIO", color = ObsidianColors.BrandCopper, fontSize = 10.sp, fontWeight = FontWeight.SemiBold, letterSpacing = 1.sp)
                 }
             }
 
-            Box(modifier = Modifier.weight(1f).fillMaxWidth()) {
+            Box(
+                modifier = Modifier.weight(1f).fillMaxWidth()
+                    .pointerInput(Unit) { detectTapGestures(onTap = { dismissPromptFocus() }) }
+            ) {
                 this@Column.AnimatedVisibility(
                     visible = showCenterBranding,
                     enter = fadeIn(),
                     exit = fadeOut(),
                     modifier = Modifier.align(Alignment.Center)
                 ) {
-                    Column(
-                        horizontalAlignment = Alignment.CenterHorizontally,
-                        modifier = Modifier.padding(horizontal = 28.dp).offset(y = 14.dp)
-                    ) {
-                        Image(
-                            painter = painterResource(id = R.drawable.logo2),
-                            contentDescription = "Mella Logo",
-                            modifier = Modifier.size(118.dp),
-                            contentScale = ContentScale.Fit
-                        )
+                    Column(horizontalAlignment = Alignment.CenterHorizontally, modifier = Modifier.padding(horizontal = 28.dp).offset(y = 10.dp)) {
+                        Image(painter = painterResource(id = R.drawable.logo2), contentDescription = "Mella Logo", modifier = Modifier.size(120.dp), contentScale = ContentScale.Fit)
                         Spacer(modifier = Modifier.height(18.dp))
                         Text(
                             text = "Share whatever you want!",
+                            textAlign = TextAlign.Center,
                             style = TextStyle(
                                 brush = Brush.linearGradient(listOf(ObsidianColors.BrandCopper, ObsidianColors.AccentViolet, ObsidianColors.StatusGreen)),
-                                fontSize = 23.sp,
+                                fontSize = 22.sp,
                                 fontFamily = FontFamily.Serif,
-                                fontWeight = FontWeight.SemiBold,
-                                letterSpacing = 0.5.sp
+                                fontWeight = FontWeight.SemiBold
                             )
                         )
                         Spacer(modifier = Modifier.height(8.dp))
@@ -154,23 +171,21 @@ fun ChatScreen(
                 }
 
                 LazyColumn(
-                    modifier = Modifier.fillMaxSize().padding(horizontal = 16.dp),
-                    verticalArrangement = Arrangement.spacedBy(14.dp),
+                    modifier = Modifier.fillMaxSize().padding(horizontal = 18.dp),
+                    verticalArrangement = Arrangement.spacedBy(18.dp),
                     contentPadding = PaddingValues(vertical = 14.dp)
                 ) {
                     items(messages) { msg ->
                         if (msg.isUser) {
                             Box(modifier = Modifier.fillMaxWidth(), contentAlignment = Alignment.CenterEnd) {
-                                Box(modifier = Modifier.widthIn(max = 300.dp).clip(RoundedCornerShape(14.dp)).background(ObsidianColors.SurfaceElevated).border(1.dp, ObsidianColors.SurfaceBorder, RoundedCornerShape(14.dp)).padding(horizontal = 14.dp, vertical = 10.dp)) {
+                                Box(modifier = Modifier.widthIn(max = 290.dp).clip(RoundedCornerShape(18.dp)).background(ObsidianColors.SurfaceElevated).border(1.dp, ObsidianColors.SurfaceBorder, RoundedCornerShape(18.dp)).padding(horizontal = 15.dp, vertical = 10.dp)) {
                                     Text(msg.text, color = ObsidianColors.TextPrimary, fontSize = 14.5.sp, lineHeight = 21.sp)
                                 }
                             }
                         } else {
-                            Column(modifier = Modifier.fillMaxWidth()) {
-                                if (msg.sources.isNotEmpty()) PerplexityFaviconAnim(sources = msg.sources, modifier = Modifier.padding(bottom = 6.dp))
-                                Box(modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp)).background(ObsidianColors.SurfaceCard).border(1.dp, ObsidianColors.SubtleDivider, RoundedCornerShape(12.dp)).padding(15.dp)) {
-                                    msg.agentTurn?.let { XmlMessageRenderer(turn = it) }
-                                }
+                            Column(modifier = Modifier.fillMaxWidth().padding(vertical = 2.dp)) {
+                                if (msg.sources.isNotEmpty()) PerplexityFaviconAnim(sources = msg.sources, modifier = Modifier.padding(bottom = 8.dp))
+                                msg.agentTurn?.let { XmlMessageRenderer(turn = it) }
                             }
                         }
                     }
@@ -201,7 +216,7 @@ fun ChatScreen(
                     onSendClick = {
                         onSendMessage(input.trim())
                         input = ""
-                        focusManager.clearFocus()
+                        dismissPromptFocus()
                     },
                     onStopClick = onStopStreaming
                 )
