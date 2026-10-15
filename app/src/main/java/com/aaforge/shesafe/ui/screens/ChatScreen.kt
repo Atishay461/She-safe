@@ -21,6 +21,7 @@ import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.text.TextStyle
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -48,6 +49,7 @@ fun ChatScreen(
     activeSessionId: String,
     isStreaming: Boolean,
     onSendMessage: (String) -> Unit,
+    onStopStreaming: () -> Unit,
     onSelectSession: (StoredChatSession) -> Unit,
     onNewSession: () -> Unit,
     onStartVoiceCall: () -> Unit
@@ -60,27 +62,28 @@ fun ChatScreen(
     ModalNavigationDrawer(
         drawerState = drawerState,
         drawerContent = {
-            ModalDrawerSheet(drawerContainerColor = ObsidianColors.SurfaceCard) {
-                Column(modifier = Modifier.fillMaxHeight().width(270.dp).padding(16.dp)) {
-                    Text("Safe Sessions", color = ObsidianColors.TextPrimary, fontWeight = FontWeight.Bold, fontSize = 17.sp)
-                    Spacer(modifier = Modifier.height(12.dp))
-                    Box(
-                        modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(10.dp))
-                            .background(ObsidianColors.PillBackground).border(1.dp, ObsidianColors.SurfaceBorder, RoundedCornerShape(10.dp))
-                            .clickable { onNewSession(); scope.launch { drawerState.close() } }.padding(12.dp)
-                    ) {
-                        Text("+ New Private Chat", color = ObsidianColors.AccentViolet, fontWeight = FontWeight.SemiBold, fontSize = 13.5.sp)
-                    }
+            ModalDrawerSheet(drawerContainerColor = ObsidianColors.DeepObsidianCanvas) {
+                Column(modifier = Modifier.fillMaxHeight().width(280.dp).background(ObsidianColors.DeepObsidianCanvas).padding(18.dp)) {
+                    Text("PRIVATE ARCHIVE", color = ObsidianColors.BrandBronze, fontWeight = FontWeight.SemiBold, fontSize = 11.sp, letterSpacing = 2.sp)
                     Spacer(modifier = Modifier.height(14.dp))
+                    Box(
+                        modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(8.dp))
+                            .background(ObsidianColors.SurfaceElevated).border(1.dp, ObsidianColors.SurfaceBorder, RoundedCornerShape(8.dp))
+                            .clickable { onNewSession(); scope.launch { drawerState.close() } }.padding(vertical = 12.dp, horizontal = 14.dp)
+                    ) {
+                        Text("+  New Confidential Session", color = ObsidianColors.TextPrimary, fontWeight = FontWeight.Medium, fontSize = 13.sp)
+                    }
+                    Spacer(modifier = Modifier.height(16.dp))
                     LazyColumn(verticalArrangement = Arrangement.spacedBy(6.dp)) {
                         items(savedSessions) { session ->
                             val isSelected = session.sessionId == activeSessionId
                             Box(
-                                modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(8.dp))
-                                    .background(if (isSelected) ObsidianColors.PillBackground else Color.Transparent)
-                                    .clickable { onSelectSession(session); scope.launch { drawerState.close() } }.padding(10.dp)
+                                modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(6.dp))
+                                    .background(if (isSelected) ObsidianColors.SurfaceElevated else Color.Transparent)
+                                    .border(1.dp, if (isSelected) ObsidianColors.SurfaceBorder else Color.Transparent, RoundedCornerShape(6.dp))
+                                    .clickable { onSelectSession(session); scope.launch { drawerState.close() } }.padding(11.dp)
                             ) {
-                                Text(session.chatName, color = ObsidianColors.TextPrimary, fontSize = 13.5.sp, maxLines = 1)
+                                Text(session.chatName, color = if (isSelected) ObsidianColors.TextPrimary else ObsidianColors.TextSecondary, fontSize = 13.sp, maxLines = 1)
                             }
                         }
                     }
@@ -88,75 +91,89 @@ fun ChatScreen(
             }
         }
     ) {
-        Box(modifier = Modifier.fillMaxSize().background(ObsidianColors.Background)) {
-            Column(modifier = Modifier.fillMaxSize()) {
-                Box(modifier = Modifier.fillMaxWidth().padding(top = 18.dp, bottom = 8.dp, start = 16.dp, end = 16.dp)) {
-                    Text("☰", color = ObsidianColors.BrandBrownish, fontSize = 20.sp, modifier = Modifier.align(Alignment.CenterStart).clickable { scope.launch { drawerState.open() } })
-                    Text("she safe", color = ObsidianColors.BrandBrownish, fontSize = 18.sp, fontWeight = FontWeight.Medium, modifier = Modifier.align(Alignment.Center))
-                    Text("Voice", color = ObsidianColors.BrandBrownish, fontSize = 12.5.sp, modifier = Modifier.align(Alignment.CenterEnd).clickable { onStartVoiceCall() })
+        Column(modifier = Modifier.fillMaxSize().background(ObsidianColors.Background)) {
+            Box(modifier = Modifier.fillMaxWidth().padding(top = 20.dp, bottom = 12.dp, start = 20.dp, end = 20.dp)) {
+                Text("≡", color = ObsidianColors.BrandBronze, fontSize = 22.sp, modifier = Modifier.align(Alignment.CenterStart).clickable { scope.launch { drawerState.open() } })
+                Text("she safe", color = ObsidianColors.BrandBronze, fontSize = 16.sp, fontFamily = FontFamily.Serif, fontWeight = FontWeight.Medium, letterSpacing = 2.5.sp, modifier = Modifier.align(Alignment.Center))
+                Box(
+                    modifier = Modifier.align(Alignment.CenterEnd).clip(RoundedCornerShape(6.dp)).background(ObsidianColors.SurfaceCard)
+                        .border(1.dp, ObsidianColors.SurfaceBorder, RoundedCornerShape(6.dp)).clickable { onStartVoiceCall() }.padding(horizontal = 10.dp, vertical = 5.dp)
+                ) {
+                    Text("LIVE AUDIO", color = ObsidianColors.BrandCopper, fontSize = 10.sp, fontWeight = FontWeight.SemiBold, letterSpacing = 1.sp)
                 }
+            }
 
-                Box(modifier = Modifier.weight(1f).fillMaxWidth()) {
-                    this@Column.AnimatedVisibility(
-                        visible = messages.isEmpty() && !isInputFocused && input.isEmpty(),
-                        enter = fadeIn(),
-                        exit = fadeOut(),
-                        modifier = Modifier.align(Alignment.Center)
-                    ) {
+            Box(modifier = Modifier.weight(1f).fillMaxWidth()) {
+                this@Column.AnimatedVisibility(
+                    visible = messages.isEmpty() && !isInputFocused && input.isEmpty(),
+                    enter = fadeIn(),
+                    exit = fadeOut(),
+                    modifier = Modifier.align(Alignment.Center)
+                ) {
+                    Column(horizontalAlignment = Alignment.CenterHorizontally, modifier = Modifier.padding(horizontal = 28.dp)) {
                         Text(
                             text = "Share whatever you want!",
                             style = TextStyle(
-                                brush = Brush.linearGradient(listOf(ObsidianColors.AccentViolet, ObsidianColors.StatusGreen, ObsidianColors.StatusAmber)),
-                                fontSize = 24.sp,
-                                fontWeight = FontWeight.Bold
+                                brush = Brush.linearGradient(listOf(ObsidianColors.BrandCopper, ObsidianColors.AccentViolet, ObsidianColors.StatusGreen)),
+                                fontSize = 23.sp,
+                                fontFamily = FontFamily.Serif,
+                                fontWeight = FontWeight.SemiBold,
+                                letterSpacing = 0.5.sp
                             )
                         )
+                        Spacer(modifier = Modifier.height(8.dp))
+                        Text("Encrypted edge channel · Zero server retention", color = ObsidianColors.TextSecondary, fontSize = 11.5.sp, letterSpacing = 0.6.sp)
                     }
+                }
 
-                    LazyColumn(
-                        modifier = Modifier.fillMaxSize().padding(horizontal = 14.dp),
-                        verticalArrangement = Arrangement.spacedBy(12.dp),
-                        contentPadding = PaddingValues(vertical = 12.dp)
-                    ) {
-                        items(messages) { msg ->
-                            if (msg.isUser) {
-                                Box(modifier = Modifier.fillMaxWidth(), contentAlignment = Alignment.CenterEnd) {
-                                    Box(modifier = Modifier.clip(RoundedCornerShape(18.dp)).background(ObsidianColors.SurfaceCard).border(1.dp, ObsidianColors.SurfaceBorder, RoundedCornerShape(18.dp)).padding(horizontal = 14.dp, vertical = 10.dp)) {
-                                        Text(msg.text, color = ObsidianColors.TextPrimary, fontSize = 14.5.sp)
-                                    }
+                LazyColumn(
+                    modifier = Modifier.fillMaxSize().padding(horizontal = 16.dp),
+                    verticalArrangement = Arrangement.spacedBy(14.dp),
+                    contentPadding = PaddingValues(vertical = 14.dp)
+                ) {
+                    items(messages) { msg ->
+                        if (msg.isUser) {
+                            Box(modifier = Modifier.fillMaxWidth(), contentAlignment = Alignment.CenterEnd) {
+                                Box(modifier = Modifier.widthIn(max = 300.dp).clip(RoundedCornerShape(14.dp)).background(ObsidianColors.SurfaceElevated).border(1.dp, ObsidianColors.SurfaceBorder, RoundedCornerShape(14.dp)).padding(horizontal = 14.dp, vertical = 10.dp)) {
+                                    Text(msg.text, color = ObsidianColors.TextPrimary, fontSize = 14.5.sp, lineHeight = 21.sp)
                                 }
-                            } else {
-                                Column(modifier = Modifier.fillMaxWidth()) {
-                                    if (msg.sources.isNotEmpty()) PerplexityFaviconAnim(sources = msg.sources, modifier = Modifier.padding(bottom = 6.dp))
-                                    Box(modifier = Modifier.clip(RoundedCornerShape(16.dp)).background(ObsidianColors.SurfaceCard).border(1.dp, ObsidianColors.SurfaceBorder, RoundedCornerShape(16.dp)).padding(14.dp)) {
-                                        msg.agentTurn?.let { XmlMessageRenderer(turn = it) }
-                                    }
+                            }
+                        } else {
+                            Column(modifier = Modifier.fillMaxWidth()) {
+                                if (msg.sources.isNotEmpty()) PerplexityFaviconAnim(sources = msg.sources, modifier = Modifier.padding(bottom = 6.dp))
+                                Box(modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp)).background(ObsidianColors.SurfaceCard).border(1.dp, ObsidianColors.SubtleDivider, RoundedCornerShape(12.dp)).padding(15.dp)) {
+                                    msg.agentTurn?.let { XmlMessageRenderer(turn = it) }
                                 }
                             }
                         }
                     }
                 }
+            }
 
-                Row(
-                    modifier = Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 12.dp)
-                        .clip(RoundedCornerShape(32.dp)).background(ObsidianColors.SurfaceCard)
-                        .border(1.dp, ObsidianColors.SurfaceBorder, RoundedCornerShape(32.dp))
-                        .padding(horizontal = 18.dp, vertical = 8.dp),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Box(modifier = Modifier.weight(1f)) {
-                        if (input.isEmpty()) Text("Share with no hesitation!", color = ObsidianColors.TextSecondary, fontSize = 14.5.sp)
-                        BasicTextField(
-                            value = input,
-                            onValueChange = { input = it },
-                            textStyle = TextStyle(color = ObsidianColors.TextPrimary, fontSize = 14.5.sp),
-                            cursorBrush = SolidColor(ObsidianColors.PureWhite),
-                            modifier = Modifier.fillMaxWidth().onFocusChanged { isInputFocused = it.isFocused }
-                        )
-                    }
-                    Spacer(modifier = Modifier.width(10.dp))
-                    UpArrowSendButton(enabled = input.isNotBlank() && !isStreaming, onClick = { onSendMessage(input.trim()); input = "" })
+            Row(
+                modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 14.dp)
+                    .clip(RoundedCornerShape(32.dp)).background(ObsidianColors.SurfaceCard)
+                    .border(1.dp, if (isInputFocused) ObsidianColors.BrandBronze else ObsidianColors.SurfaceBorder, RoundedCornerShape(32.dp))
+                    .padding(start = 20.dp, end = 8.dp, top = 8.dp, bottom = 8.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Box(modifier = Modifier.weight(1f)) {
+                    if (input.isEmpty()) Text("Share with no hesitation!", color = ObsidianColors.TextSecondary, fontSize = 14.sp)
+                    BasicTextField(
+                        value = input,
+                        onValueChange = { input = it },
+                        textStyle = TextStyle(color = ObsidianColors.TextPrimary, fontSize = 14.5.sp),
+                        cursorBrush = SolidColor(ObsidianColors.BrandCopper),
+                        modifier = Modifier.fillMaxWidth().onFocusChanged { isInputFocused = it.isFocused }
+                    )
                 }
+                Spacer(modifier = Modifier.width(10.dp))
+                UpArrowSendButton(
+                    canSend = input.isNotBlank(),
+                    isStreaming = isStreaming,
+                    onSendClick = { onSendMessage(input.trim()); input = "" },
+                    onStopClick = onStopStreaming
+                )
             }
         }
     }

@@ -15,11 +15,13 @@ import com.aaforge.shesafe.parser.*
 import com.aaforge.shesafe.searchtool.*
 import com.aaforge.shesafe.ui.screens.*
 import com.aaforge.shesafe.ui.theme.SheSafeTheme
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
 import java.util.UUID
 
 class MainActivity : ComponentActivity() {
     private val voiceClient = LiveVoiceStreamClient()
+    private var activeStreamJob: Job? = null
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -59,11 +61,15 @@ class MainActivity : ComponentActivity() {
                         activeSessionId = activeSessionId,
                         isStreaming = isStreaming,
                         onNewSession = {
+                            activeStreamJob?.cancel()
+                            isStreaming = false
                             activeSessionId = UUID.randomUUID().toString()
                             activeChatTitle = "New Safe Chat"
                             messages.clear()
                         },
                         onSelectSession = { session ->
+                            activeStreamJob?.cancel()
+                            isStreaming = false
                             activeSessionId = session.sessionId
                             activeChatTitle = session.chatName
                             messages.clear()
@@ -72,14 +78,26 @@ class MainActivity : ComponentActivity() {
                                 else messages.add(UiChatMessage(isUser = false, rawXml = rec.rawContent, agentTurn = XmlBlockParser.parseXmlStream(rec.rawContent)))
                             }
                         },
+                        onStopStreaming = {
+                            activeStreamJob?.cancel()
+                            activeStreamJob = null
+                            if (messages.isNotEmpty() && !messages.last().isUser) {
+                                val lastMsg = messages.last()
+                                val stoppedTurn = lastMsg.agentTurn?.copy(isCurrentlyThinking = false)
+                                messages[messages.lastIndex] = lastMsg.copy(agentTurn = stoppedTurn)
+                            }
+                            isStreaming = false
+                            persistCurrentState()
+                        },
                         onSendMessage = { prompt ->
+                            activeStreamJob?.cancel()
                             messages.add(UiChatMessage(isUser = true, text = prompt))
                             val buffer = StreamChunkBuffer()
                             val agentIdx = messages.size
                             messages.add(UiChatMessage(isUser = false, agentTurn = ParsedAgentTurn(isCurrentlyThinking = true)))
                             isStreaming = true
 
-                            lifecycleScope.launch {
+                            activeStreamJob = lifecycleScope.launch {
                                 val history = messages.dropLast(1).map {
                                     ChatHistoryTurn(if (it.isUser) "user" else "model", if (it.isUser) it.text else it.rawXml)
                                 }
