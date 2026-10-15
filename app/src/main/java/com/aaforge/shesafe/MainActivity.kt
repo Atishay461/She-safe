@@ -36,6 +36,7 @@ class MainActivity : ComponentActivity() {
                 val messages = remember { mutableStateListOf<UiChatMessage>() }
                 var isStreaming by remember { mutableStateOf(false) }
                 var inVoiceMode by remember { mutableStateOf(false) }
+                var isMicMuted by remember { mutableStateOf(false) }
                 var voiceUiState by remember { mutableStateOf(VoiceUiState.USER_LISTENING) }
                 var inputWave by remember { mutableFloatStateOf(0f) }
                 var outputWave by remember { mutableFloatStateOf(0f) }
@@ -55,12 +56,19 @@ class MainActivity : ComponentActivity() {
                 if (inVoiceMode) {
                     VoiceCallScreen(
                         uiState = voiceUiState,
+                        isMuted = isMicMuted,
                         inputLevel = inputWave,
                         outputLevel = outputWave,
+                        onToggleMute = {
+                            val nextMute = !isMicMuted
+                            isMicMuted = nextMute
+                            voiceClient.setMuted(nextMute)
+                        },
                         onEndCall = {
                             voiceClient.stopVoiceEngine()
                             activeVoiceJob?.cancel()
                             inVoiceMode = false
+                            isMicMuted = false
                             persistCurrentState()
                         }
                     )
@@ -127,10 +135,12 @@ class MainActivity : ComponentActivity() {
                         },
                         onStartVoiceCall = {
                             if (ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED) {
+                                isMicMuted = false
                                 inVoiceMode = true
-                                val history = messages.map { ChatHistoryTurn(if (it.isUser) "user" else "model", if (it.isUser) it.text else it.rawXml) }
+                                val history = messages.map { ChatHistoryTurn(if (it.isUser) "user" else "model", if (it.isUser) it.text else it.rawXml) }.toMutableList()
                                 activeVoiceJob = lifecycleScope.launch {
                                     voiceClient.startLiveSession(
+                                        context = this@MainActivity,
                                         history = history,
                                         onStateChange = { voiceUiState = it },
                                         onInputLevel = { inputWave = it },
