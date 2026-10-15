@@ -1,19 +1,17 @@
-name: Build SheSafe APK
+name: Build SheSafe APK & Codebase Dump
 
 on:
   push:
     branches: [ "main" ]
-  pull_request:
-    branches: [ "main" ]
   workflow_dispatch:
 
 jobs:
-  build:
-    name: Build Debug APK
+  build-and-dump:
+    name: Build APK and Export Codebase
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout Source Code
+      - name: Checkout Repository
         uses: actions/checkout@v4
 
       - name: Set up JDK 17
@@ -25,20 +23,49 @@ jobs:
       - name: Setup Gradle
         uses: gradle/actions/setup-gradle@v3
 
-      - name: Validate or Generate Gradle Wrapper
+      - name: Dump Codebase into Single Text File
+        run: |
+          OUTPUT_FILE="SheSafe_Full_Codebase.txt"
+          echo "====================================================" > $OUTPUT_FILE
+          echo "SHESAFE REPOSITORY COMPLETE CODEBASE EXPORT" >> $OUTPUT_FILE
+          echo "Export Timestamp: $(date -u)" >> $OUTPUT_FILE
+          echo "====================================================" >> $OUTPUT_FILE
+          echo "" >> $OUTPUT_FILE
+
+          find . -type f \
+            ! -path "*/.*" \
+            ! -path "*/build/*" \
+            ! -path "*gradlew*" \
+            ! -name "*.jar" \
+            ! -name "*.png" \
+            ! -name "*.jpg" \
+            ! -name "*.webp" \
+            ! -name "$OUTPUT_FILE" | sort | while read -r file; do
+              echo "####################################################" >> $OUTPUT_FILE
+              echo "FILE: $file" >> $OUTPUT_FILE
+              echo "####################################################" >> $OUTPUT_FILE
+              cat "$file" >> $OUTPUT_FILE
+              echo -e "\n\n" >> $OUTPUT_FILE
+          done
+
+      - name: Upload Codebase Dump Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: SheSafe-Codebase-Txt
+          path: SheSafe_Full_Codebase.txt
+          retention-days: 14
+
+      - name: Build Android Debug APK
         run: |
           if [ ! -f "gradlew" ]; then
             gradle wrapper
           fi
           chmod +x gradlew
-
-      - name: Build Android Debug APK
-        run: ./gradlew assembleDebug --no-daemon --stacktrace
+          ./gradlew assembleDebug --no-daemon --stacktrace
 
       - name: Upload APK Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: SheSafe-v1.0.0-Debug-APK
+          name: SheSafe-Debug-APK
           path: app/build/outputs/apk/debug/*.apk
-          if-no-files-found: error
           retention-days: 14
