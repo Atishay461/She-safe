@@ -142,12 +142,12 @@ class LiveVoiceStreamClient {
             .build()
         activePlayer = trk; trk.play()
 
-        @Volatile var interrupted = false
+        val interrupted = java.util.concurrent.atomic.AtomicBoolean(false)
         val capturedInterrupt = ByteArrayOutputStream()
 
         val writerJob = launch(Dispatchers.IO) {
             var off = 44
-            while (isActive && active && !interrupted && off < wav.size) {
+            while (isActive && active && !interrupted.get() && off < wav.size) {
                 val len = (wav.size - off).coerceAtMost(8192)
                 val written = trk.write(wav, off, len)
                 if (written <= 0) break
@@ -158,7 +158,7 @@ class LiveVoiceStreamClient {
         val monitorJob = launch(Dispatchers.IO) {
             val mBuf = ByteArray(1600)
             var bargeFrames = 0
-            while (isActive && active && !interrupted) {
+            while (isActive && active && !interrupted.get()) {
                 val head = trk.playbackHeadPosition
                 if (head >= totalFrames && !writerJob.isActive) break
                 val bytePos = (44 + head * 2).coerceIn(44, (wav.size - 1024).coerceAtLeast(44))
@@ -171,7 +171,7 @@ class LiveVoiceStreamClient {
                         bargeFrames++
                         capturedInterrupt.write(mBuf, 0, r)
                         if (bargeFrames >= 4) {
-                            interrupted = true
+                            interrupted.set(true)
                             runCatching { trk.pause(); trk.flush() }
                             writerJob.cancel()
                             break
@@ -183,7 +183,7 @@ class LiveVoiceStreamClient {
 
         writerJob.join(); monitorJob.join()
         runCatching { trk.stop(); trk.release() }; activePlayer = null
-        if (interrupted) capturedInterrupt.toByteArray() else null
+        if (interrupted.get()) capturedInterrupt.toByteArray() else null
     }
 
     private fun sendVoiceTurnToCloudflare(wavBytes: ByteArray, history: List<ChatHistoryTurn>): String {
