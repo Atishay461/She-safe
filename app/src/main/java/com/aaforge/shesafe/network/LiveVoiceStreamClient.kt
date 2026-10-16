@@ -13,6 +13,7 @@ import org.json.JSONObject
 import java.net.URLEncoder
 import java.util.concurrent.LinkedBlockingQueue
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicReference
 import kotlin.math.sqrt
 
 enum class VoiceUiState { USER_LISTENING, PROCESSING, MODEL_SPEAKING }
@@ -79,17 +80,16 @@ class LiveVoiceStreamClient {
         rec.startRecording(); trk.play()
 
         val pcmOutQueue = LinkedBlockingQueue<ByteArray>()
-        @Volatile var currentState = VoiceUiState.USER_LISTENING
-        onStateChange(currentState)
+        val stateRef = AtomicReference(VoiceUiState.USER_LISTENING)
+        onStateChange(VoiceUiState.USER_LISTENING)
 
-        // 1. Dedicated Smooth Speaker Writer Thread (Eliminates all stutter)
         val speakerJob = launch(Dispatchers.IO) {
             while (isActive && active) {
                 val chunk = pcmOutQueue.poll(40, TimeUnit.MILLISECONDS)
                 if (chunk != null) {
-                    if (currentState != VoiceUiState.MODEL_SPEAKING) {
-                        currentState = VoiceUiState.MODEL_SPEAKING
-                        onStateChange(currentState)
+                    if (stateRef.get() != VoiceUiState.MODEL_SPEAKING) {
+                        stateRef.set(VoiceUiState.MODEL_SPEAKING)
+                        onStateChange(VoiceUiState.MODEL_SPEAKING)
                     }
                     var off = 0
                     while (off < chunk.size && active) {
@@ -98,15 +98,14 @@ class LiveVoiceStreamClient {
                         trk.write(chunk, off, step)
                         off += step
                     }
-                } else if (currentState == VoiceUiState.MODEL_SPEAKING && pcmOutQueue.isEmpty()) {
+                } else if (stateRef.get() == VoiceUiState.MODEL_SPEAKING && pcmOutQueue.isEmpty()) {
                     onOutputLevel(0f)
-                    currentState = VoiceUiState.USER_LISTENING
-                    onStateChange(currentState)
+                    stateRef.set(VoiceUiState.USER_LISTENING)
+                    onStateChange(VoiceUiState.USER_LISTENING)
                 }
             }
         }
 
-        // 2. WebSocket Incoming Reader Thread (Receives Native Expressive Audio from Gemini)
         val readerJob = launch(Dispatchers.IO) {
             val transcriptSb = StringBuilder()
             while (isActive && active && conn.isConnected) {
@@ -119,8 +118,8 @@ class LiveVoiceStreamClient {
                         pcmOutQueue.clear()
                         runCatching { trk.pause(); trk.flush(); trk.play() }
                         onOutputLevel(0f)
-                        currentState = VoiceUiState.USER_LISTENING
-                        onStateChange(currentState)
+                        stateRef.set(VoiceUiState.USER_LISTENING)
+                        onStateChange(VoiceUiState.USER_LISTENING)
                     }
                     val parts = sc.optJSONObject("modelTurn")?.optJSONArray("parts")
                     if (parts != null) {
@@ -144,8 +143,7 @@ class LiveVoiceStreamClient {
             }
         }
 
-        // 3. Real-Time Microphone Streamer with Adaptive VAD
-        val micBuf = ByteArray(3200) // 100ms chunks at 16kHz
+        val micBuf = ByteArray(3200)
         var userSpokeInTurn = false
         var lastVoiceMs = System.currentTimeMillis()
         var noiseFloor = 0.015f
@@ -155,7 +153,7 @@ class LiveVoiceStreamClient {
             if (read <= 0) continue
 
             val rms = if (isMicMuted) 0f else calcRms(micBuf, 0, read)
-            if (!userSpokeInTurn && !isMicMuted && currentState == VoiceUiState.USER_LISTENING) {
+            if (!userSpokeInTurn && !isMicMuted && stateRef.get() == VoiceUiState.USER_LISTENING) {
                 noiseFloor = (noiseFloor * 0.92f + rms * 0.08f).coerceIn(0.008f, 0.045f)
             }
             val startThresh = (noiseFloor + 0.042f).coerceAtLeast(0.055f)
@@ -165,20 +163,20 @@ class LiveVoiceStreamClient {
             val now = System.currentTimeMillis()
             if (!isMicMuted) {
                 if (rms >= startThresh) {
-                    if (currentState == VoiceUiState.MODEL_SPEAKING && rms >= startThresh + 0.04f) {
+                    if (stateRef.get() == VoiceUiState.MODEL_SPEAKING && rms >= startThresh + 0.04f) {
                         pcmOutQueue.clear()
                         runCatching { trk.pause(); trk.flush(); trk.play() }
-                        currentState = VoiceUiState.USER_LISTENING
-                        onStateChange(currentState)
+                        stateRef.set(VoiceUiState.USER_LISTENING)
+                        onStateChange(VoiceUiState.USER_LISTENING)
                     }
                     userSpokeInTurn = true
                     lastVoiceMs = now
                 } else if (userSpokeInTurn && rms >= sustainThresh) {
                     lastVoiceMs = now
-                } else if (userSpokeInTurn && currentState == VoiceUiState.USER_LISTENING && (now - lastVoiceMs) > 1500L) {
+                } else if (userSpokeInTurn && stateRef.get() == VoiceUiState.USER_LISTENING && (now - lastVoiceMs) > 1500L) {
                     userSpokeInTurn = false
-                    currentState = VoiceUiState.PROCESSING
-                    onStateChange(currentState)
+                    stateRef.set(VoiceUiState.PROCESSING)
+                    onStateChange(VoiceUiState.PROCESSING)
                 }
 
                 val b64 = Base64.encodeToString(micBuf.copyOf(read), Base64.NO_WRAP)
