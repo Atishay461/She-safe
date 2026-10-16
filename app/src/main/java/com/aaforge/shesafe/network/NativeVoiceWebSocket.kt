@@ -3,9 +3,12 @@ package com.aaforge.shesafe.network
 import android.util.Base64
 import java.io.BufferedInputStream
 import java.io.BufferedOutputStream
+import java.io.ByteArrayOutputStream
 import java.net.URI
 import java.nio.charset.StandardCharsets
 import java.security.SecureRandom
+import javax.net.ssl.SNIHostName
+import javax.net.ssl.SSLParameters
 import javax.net.ssl.SSLSocket
 import javax.net.ssl.SSLSocketFactory
 
@@ -28,9 +31,12 @@ class NativeVoiceWebSocket(private val wsUrl: String) {
             soTimeout = 0
             keepAlive = true
             tcpNoDelay = true
+            sslParameters = sslParameters.apply {
+                serverNames = listOf(SNIHostName(host))
+            }
             startHandshake()
         }
-        val inp = BufferedInputStream(ssl.inputStream, 65536)
+        val inp = BufferedInputStream(ssl.inputStream, 131072)
         val out = BufferedOutputStream(ssl.outputStream, 65536)
 
         val keyBytes = ByteArray(16).also { random.nextBytes(it) }
@@ -79,45 +85,52 @@ class NativeVoiceWebSocket(private val wsUrl: String) {
         }
         val mask = ByteArray(4).also { random.nextBytes(it) }
         out.write(mask)
-        for (i in 0 until len) {
-            payload[i] = (payload[i].toInt() xor mask[i and 3].toInt()).toByte()
-        }
+        for (i in 0 until len) payload[i] = (payload[i].toInt() xor mask[i and 3].toInt()).toByte()
         out.write(payload)
         out.flush()
     }
 
-    fun readNextFrame(): String? {
+    fun readNextMessage(): String? {
         val inp = input ?: return null
-        val b0 = inp.read(); if (b0 == -1) return null
-        val opcode = b0 and 0x0F
-        if (opcode == 0x8) return null
-        val b1 = inp.read(); if (b1 == -1) return null
-        var len = (b1 and 0x7F).toLong()
-        if (len == 126L) {
-            len = ((inp.read() and 0xFF) shl 8 or (inp.read() and 0xFF)).toLong()
-        } else if (len == 127L) {
-            len = 0L
-            for (i in 0..7) len = (len shl 8) or (inp.read().toLong() and 0xFF)
+        val messageBuffer = ByteArrayOutputStream()
+        while (true) {
+            val b0 = inp.read(); if (b0 == -1) return null
+            val isFin = (b0 and 0x80) != 0
+            val opcode = b0 and 0x0F
+            val b1 = inp.read(); if (b1 == -1) return null
+            var len = (b1 and 0x7F).toLong()
+            if (len == 126L) {
+                len = ((inp.read() and 0xFF) shl 8 or (inp.read() and 0xFF)).toLong()
+            } else if (len == 127L) {
+                len = 0L
+                for (i in 0..7) len = (len shl 8) or (inp.read().toLong() and 0xFF)
+            }
+            val mask = if ((b1 and 0x80) != 0) ByteArray(4).also { readExact(inp, it) } else null
+            val payload = ByteArray(len.toInt()).also { readExact(inp, it) }
+            if (mask != null) {
+                for (i in payload.indices) payload[i] = (payload[i].toInt() xor mask[i and 3].toInt()).toByte()
+            }
+            when (opcode) {
+                0x8 -> { isConnected = false; return null }
+                0x9 -> { runCatching { sendPong(payload) }; continue }
+                0xA -> continue
+                0x0, 0x1, 0x2 -> {
+                    messageBuffer.write(payload)
+                    if (isFin) return String(messageBuffer.toByteArray(), StandardCharsets.UTF_8)
+                }
+            }
         }
-        val mask = if ((b1 and 0x80) != 0) ByteArray(4).also { readExact(inp, it) } else null
-        val data = ByteArray(len.toInt()).also { readExact(inp, it) }
-        if (mask != null) {
-            for (i in data.indices) data[i] = (data[i].toInt() xor mask[i and 3].toInt()).toByte()
-        }
-        if (opcode == 0x9) {
-            runCatching { sendPong(data) }
-            return ""
-        }
-        return if (opcode == 0x1 || opcode == 0x2) String(data, StandardCharsets.UTF_8) else ""
     }
 
     @Synchronized
     private fun sendPong(data: ByteArray) {
         val out = output ?: return
         out.write(0x8A)
-        out.write(0x80 or data.size.coerceAtMost(125))
+        val len = data.size.coerceAtMost(125)
+        out.write(0x80 or len)
         val mask = ByteArray(4).also { random.nextBytes(it) }
         out.write(mask)
+        for (i in 0 until len) out.write(data[i].toInt() xor mask[i and 3].toInt())
         out.flush()
     }
 
