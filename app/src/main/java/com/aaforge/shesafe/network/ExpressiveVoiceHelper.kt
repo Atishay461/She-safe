@@ -99,7 +99,7 @@ object ExpressiveVoiceHelper {
         })
 
         val params = Bundle().apply {
-            putString(TextToSpeech.Engine.KEY_PARAM_NETWORK_SYNTHESIS, "true")
+            putString("networkTts", "true")
         }
         if (engine.synthesizeToFile(cleanText, params, tempFile, uttId) != TextToSpeech.SUCCESS) {
             return Pair(cleanText, null)
