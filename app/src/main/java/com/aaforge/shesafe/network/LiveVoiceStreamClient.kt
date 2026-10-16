@@ -5,35 +5,30 @@ import android.content.Context
 import android.media.*
 import android.media.audiofx.AcousticEchoCanceler
 import android.media.audiofx.NoiseSuppressor
-import android.speech.tts.TextToSpeech
 import android.util.Base64
 import com.aaforge.shesafe.core.BackendEndpoint
-import com.aaforge.shesafe.core.DateTimeProvider
 import kotlinx.coroutines.*
 import org.json.JSONArray
 import org.json.JSONObject
-import java.io.*
-import java.net.URL
-import java.nio.charset.StandardCharsets
-import javax.net.ssl.HttpsURLConnection
+import java.net.URLEncoder
+import java.util.concurrent.LinkedBlockingQueue
+import java.util.concurrent.TimeUnit
+import kotlin.math.sqrt
 
 enum class VoiceUiState { USER_LISTENING, PROCESSING, MODEL_SPEAKING }
 
 class LiveVoiceStreamClient {
     private val inRate = 16000
+    private val outRate = 24000
     @Volatile private var active = false
     @Volatile var isMicMuted = false; private set
-    @Volatile private var forceProcessTurn = false
+    private var ws: NativeVoiceWebSocket? = null
     private var recorder: AudioRecord? = null
-    private var activePlayer: AudioTrack? = null
-    private var ttsEngine: TextToSpeech? = null
+    private var player: AudioTrack? = null
     private var aec: AcousticEchoCanceler? = null
     private var ns: NoiseSuppressor? = null
 
-    fun setMuted(muted: Boolean) {
-        isMicMuted = muted
-        if (muted) forceProcessTurn = true
-    }
+    fun setMuted(muted: Boolean) { isMicMuted = muted }
 
     @SuppressLint("MissingPermission")
     suspend fun startLiveSession(
@@ -45,181 +40,174 @@ class LiveVoiceStreamClient {
         onTranscriptTurn: (Boolean, String) -> Unit
     ) = withContext(Dispatchers.IO) {
         active = true; isMicMuted = false
-        ttsEngine = TextToSpeech(context.applicationContext) { s ->
-            if (s == TextToSpeech.SUCCESS) ttsEngine?.let { WavAudioHelper.configureVoice(it) }
+        val histJson = JSONArray().apply {
+            history.takeLast(6).forEach { put(JSONObject().put("role", it.role).put("content", it.content)) }
+        }.toString()
+        val encodedHist = URLEncoder.encode(histJson, "UTF-8")
+        val modelsToTry = listOf(
+            "models/gemini-2.5-flash-preview-native-audio-dialog",
+            "models/gemini-2.0-flash-live-001"
+        )
+
+        var conn: NativeVoiceWebSocket? = null
+        for (modelName in modelsToTry) {
+            val url = "${BackendEndpoint.VOICE_WS_ENDPOINT}?model=${URLEncoder.encode(modelName, "UTF-8")}&history=$encodedHist"
+            val candidate = NativeVoiceWebSocket(url)
+            if (runCatching { candidate.connect() }.isSuccess) {
+                conn = candidate; break
+            }
         }
+        if (conn == null) { stopVoiceEngine(); return@withContext }
+        ws = conn
+
         val inBufSize = AudioRecord.getMinBufferSize(inRate, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT).coerceAtLeast(3200)
+        val outBufSize = AudioTrack.getMinBufferSize(outRate, AudioFormat.CHANNEL_OUT_MONO, AudioFormat.ENCODING_PCM_16BIT).coerceAtLeast(9600)
+
         val rec = AudioRecord(MediaRecorder.AudioSource.VOICE_COMMUNICATION, inRate, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT, inBufSize * 2)
-        recorder = rec
+        val trk = AudioTrack.Builder()
+            .setAudioAttributes(AudioAttributes.Builder().setUsage(AudioAttributes.USAGE_MEDIA).setContentType(AudioAttributes.CONTENT_TYPE_SPEECH).build())
+            .setAudioFormat(AudioFormat.Builder().setEncoding(AudioFormat.ENCODING_PCM_16BIT).setSampleRate(outRate).setChannelMask(AudioFormat.CHANNEL_OUT_MONO).build())
+            .setBufferSizeInBytes(outBufSize * 4)
+            .setTransferMode(AudioTrack.MODE_STREAM)
+            .build()
+
+        recorder = rec; player = trk
         runCatching {
             if (AcousticEchoCanceler.isAvailable()) aec = AcousticEchoCanceler.create(rec.audioSessionId)?.apply { enabled = true }
             if (NoiseSuppressor.isAvailable()) ns = NoiseSuppressor.create(rec.audioSessionId)?.apply { enabled = true }
         }
-        rec.startRecording()
+        rec.startRecording(); trk.play()
 
-        val micBuf = ByteArray(1600)
-        val rollingPreRoll = ArrayDeque<ByteArray>(8)
-        val speechAccumulator = ByteArrayOutputStream()
-        var hasSpoken = false
-        var lastVoiceMs = System.currentTimeMillis()
-        var noiseFloor = 0.015f
-        onStateChange(VoiceUiState.USER_LISTENING)
+        val pcmOutQueue = LinkedBlockingQueue<ByteArray>()
+        @Volatile var currentState = VoiceUiState.USER_LISTENING
+        onStateChange(currentState)
 
-        while (isActive && active) {
-            val read = rec.read(micBuf, 0, micBuf.size)
-            if (read <= 0) continue
-            val frameCopy = micBuf.copyOf(read)
-            val rawRms = if (isMicMuted) 0f else WavAudioHelper.calcRms(frameCopy, 0, read)
-
-            if (!hasSpoken && !isMicMuted) {
-                noiseFloor = (noiseFloor * 0.92f + rawRms * 0.08f).coerceIn(0.008f, 0.045f)
-            }
-            val startThreshold = (noiseFloor + 0.042f).coerceAtLeast(0.055f)
-            val sustainThreshold = (noiseFloor + 0.016f).coerceAtLeast(0.026f)
-            val visualLevel = ((rawRms - noiseFloor).coerceAtLeast(0f) * 2.2f).coerceIn(0f, 1f)
-            onInputLevel(if (isMicMuted) 0f else visualLevel)
-            val now = System.currentTimeMillis()
-
-            if (!hasSpoken) {
-                if (rollingPreRoll.size >= 7) rollingPreRoll.removeFirst()
-                rollingPreRoll.addLast(frameCopy)
-                if (!isMicMuted && rawRms >= startThreshold) {
-                    hasSpoken = true; lastVoiceMs = now
-                    rollingPreRoll.forEach { speechAccumulator.write(it) }
-                    rollingPreRoll.clear()
+        // 1. Dedicated Smooth Speaker Writer Thread (Eliminates all stutter)
+        val speakerJob = launch(Dispatchers.IO) {
+            while (isActive && active) {
+                val chunk = pcmOutQueue.poll(40, TimeUnit.MILLISECONDS)
+                if (chunk != null) {
+                    if (currentState != VoiceUiState.MODEL_SPEAKING) {
+                        currentState = VoiceUiState.MODEL_SPEAKING
+                        onStateChange(currentState)
+                    }
+                    var off = 0
+                    while (off < chunk.size && active) {
+                        val step = (chunk.size - off).coerceAtMost(2400)
+                        onOutputLevel(calcRms(chunk, off, step))
+                        trk.write(chunk, off, step)
+                        off += step
+                    }
+                } else if (currentState == VoiceUiState.MODEL_SPEAKING && pcmOutQueue.isEmpty()) {
+                    onOutputLevel(0f)
+                    currentState = VoiceUiState.USER_LISTENING
+                    onStateChange(currentState)
                 }
-            } else {
-                speechAccumulator.write(frameCopy)
-                if (!isMicMuted && rawRms >= sustainThreshold) lastVoiceMs = now
             }
+        }
 
-            val silenceMs = now - lastVoiceMs
-            val shouldSend = hasSpoken && speechAccumulator.size() >= 22000 &&
-                    (silenceMs >= 1650L || speechAccumulator.size() >= 768000 || forceProcessTurn)
-
-            if (shouldSend) {
-                forceProcessTurn = false; hasSpoken = false; onInputLevel(0f)
-                onStateChange(VoiceUiState.PROCESSING)
-                val wavBytes = WavAudioHelper.pcmToWav(speechAccumulator.toByteArray(), inRate)
-                speechAccumulator.reset()
-
-                val replyText = sendVoiceTurnToCloudflare(wavBytes, history)
-                if (replyText.isNotBlank() && active) {
-                    history.add(ChatHistoryTurn("model", replyText))
-                    onTranscriptTurn(false, "<p>$replyText</p>")
-                    val synthWav = WavAudioHelper.synthesizeToWavBytes(context, ttsEngine, replyText)
-                    if (synthWav != null && active) {
-                        onStateChange(VoiceUiState.MODEL_SPEAKING)
-                        val bargeInBytes = playSmoothWithParallelBargeIn(synthWav, rec, startThreshold, onOutputLevel)
+        // 2. WebSocket Incoming Reader Thread (Receives Native Expressive Audio from Gemini)
+        val readerJob = launch(Dispatchers.IO) {
+            val transcriptSb = StringBuilder()
+            while (isActive && active && conn.isConnected) {
+                val frame = runCatching { conn.readNextFrame() }.getOrNull() ?: break
+                if (frame.isBlank()) continue
+                runCatching {
+                    val json = JSONObject(frame)
+                    val sc = json.optJSONObject("serverContent") ?: return@runCatching
+                    if (sc.optBoolean("interrupted", false)) {
+                        pcmOutQueue.clear()
+                        runCatching { trk.pause(); trk.flush(); trk.play() }
                         onOutputLevel(0f)
-                        if (bargeInBytes != null && active) {
-                            hasSpoken = true; lastVoiceMs = System.currentTimeMillis()
-                            speechAccumulator.write(bargeInBytes)
+                        currentState = VoiceUiState.USER_LISTENING
+                        onStateChange(currentState)
+                    }
+                    val parts = sc.optJSONObject("modelTurn")?.optJSONArray("parts")
+                    if (parts != null) {
+                        for (i in 0 until parts.length()) {
+                            val p = parts.getJSONObject(i)
+                            val txt = p.optString("text", "")
+                            if (txt.isNotBlank()) transcriptSb.append(txt)
+                            val b64 = p.optJSONObject("inlineData")?.optString("data", "") ?: ""
+                            if (b64.isNotEmpty()) {
+                                pcmOutQueue.offer(Base64.decode(b64, Base64.DEFAULT))
+                            }
+                        }
+                    }
+                    if (sc.optBoolean("turnComplete", false)) {
+                        if (transcriptSb.isNotBlank()) {
+                            onTranscriptTurn(false, "<p>${transcriptSb.toString().trim()}</p>")
+                            transcriptSb.clear()
                         }
                     }
                 }
-                if (active) onStateChange(VoiceUiState.USER_LISTENING)
             }
         }
+
+        // 3. Real-Time Microphone Streamer with Adaptive VAD
+        val micBuf = ByteArray(3200) // 100ms chunks at 16kHz
+        var userSpokeInTurn = false
+        var lastVoiceMs = System.currentTimeMillis()
+        var noiseFloor = 0.015f
+
+        while (isActive && active && conn.isConnected) {
+            val read = rec.read(micBuf, 0, micBuf.size)
+            if (read <= 0) continue
+
+            val rms = if (isMicMuted) 0f else calcRms(micBuf, 0, read)
+            if (!userSpokeInTurn && !isMicMuted && currentState == VoiceUiState.USER_LISTENING) {
+                noiseFloor = (noiseFloor * 0.92f + rms * 0.08f).coerceIn(0.008f, 0.045f)
+            }
+            val startThresh = (noiseFloor + 0.042f).coerceAtLeast(0.055f)
+            val sustainThresh = (noiseFloor + 0.016f).coerceAtLeast(0.025f)
+            onInputLevel(if (isMicMuted) 0f else ((rms - noiseFloor).coerceAtLeast(0f) * 2.2f).coerceIn(0f, 1f))
+
+            val now = System.currentTimeMillis()
+            if (!isMicMuted) {
+                if (rms >= startThresh) {
+                    if (currentState == VoiceUiState.MODEL_SPEAKING && rms >= startThresh + 0.04f) {
+                        pcmOutQueue.clear()
+                        runCatching { trk.pause(); trk.flush(); trk.play() }
+                        currentState = VoiceUiState.USER_LISTENING
+                        onStateChange(currentState)
+                    }
+                    userSpokeInTurn = true
+                    lastVoiceMs = now
+                } else if (userSpokeInTurn && rms >= sustainThresh) {
+                    lastVoiceMs = now
+                } else if (userSpokeInTurn && currentState == VoiceUiState.USER_LISTENING && (now - lastVoiceMs) > 1500L) {
+                    userSpokeInTurn = false
+                    currentState = VoiceUiState.PROCESSING
+                    onStateChange(currentState)
+                }
+
+                val b64 = Base64.encodeToString(micBuf.copyOf(read), Base64.NO_WRAP)
+                val packet = """{"realtimeInput":{"mediaChunks":[{"mimeType":"audio/pcm;rate=16000","data":"$b64"}]}}"""
+                runCatching { conn.sendTextFrame(packet) }
+            }
+        }
+        speakerJob.cancel(); readerJob.cancel()
     }
 
-    private suspend fun playSmoothWithParallelBargeIn(
-        wav: ByteArray,
-        rec: AudioRecord,
-        bargeThreshold: Float,
-        onOut: (Float) -> Unit
-    ): ByteArray? = coroutineScope {
-        val sr = WavAudioHelper.readWavSampleRate(wav)
-        val totalPcmBytes = (wav.size - 44).coerceAtLeast(0)
-        if (totalPcmBytes == 0) return@coroutineScope null
-        val totalFrames = totalPcmBytes / 2
-        val minBuf = AudioTrack.getMinBufferSize(sr, AudioFormat.CHANNEL_OUT_MONO, AudioFormat.ENCODING_PCM_16BIT).coerceAtLeast(8192)
-        val trk = AudioTrack.Builder()
-            .setAudioAttributes(AudioAttributes.Builder().setUsage(AudioAttributes.USAGE_MEDIA).setContentType(AudioAttributes.CONTENT_TYPE_SPEECH).build())
-            .setAudioFormat(AudioFormat.Builder().setEncoding(AudioFormat.ENCODING_PCM_16BIT).setSampleRate(sr).setChannelMask(AudioFormat.CHANNEL_OUT_MONO).build())
-            .setBufferSizeInBytes(minBuf * 4)
-            .setTransferMode(AudioTrack.MODE_STREAM)
-            .build()
-        activePlayer = trk; trk.play()
-
-        val interrupted = java.util.concurrent.atomic.AtomicBoolean(false)
-        val capturedInterrupt = ByteArrayOutputStream()
-
-        val writerJob = launch(Dispatchers.IO) {
-            var off = 44
-            while (isActive && active && !interrupted.get() && off < wav.size) {
-                val len = (wav.size - off).coerceAtMost(8192)
-                val written = trk.write(wav, off, len)
-                if (written <= 0) break
-                off += written
-            }
+    private fun calcRms(buf: ByteArray, offset: Int, len: Int): Float {
+        val samples = len / 2
+        if (samples <= 0) return 0f
+        var sum = 0.0
+        var i = offset
+        val limit = (offset + len).coerceAtMost(buf.size - 1)
+        while (i < limit) {
+            val s = ((buf[i + 1].toInt() shl 8) or (buf[i].toInt() and 0xFF)).toShort().toDouble()
+            sum += s * s; i += 2
         }
-
-        val monitorJob = launch(Dispatchers.IO) {
-            val mBuf = ByteArray(1600)
-            var bargeFrames = 0
-            while (isActive && active && !interrupted.get()) {
-                val head = trk.playbackHeadPosition
-                if (head >= totalFrames && !writerJob.isActive) break
-                val bytePos = (44 + head * 2).coerceIn(44, (wav.size - 1024).coerceAtLeast(44))
-                val rmsLen = (wav.size - bytePos).coerceAtMost(1024)
-                onOut(if (rmsLen > 0) WavAudioHelper.calcRms(wav, bytePos, rmsLen) else 0f)
-
-                val r = rec.read(mBuf, 0, mBuf.size)
-                if (!isMicMuted && r > 0) {
-                    if (WavAudioHelper.calcRms(mBuf, 0, r) >= (bargeThreshold + 0.045f)) {
-                        bargeFrames++
-                        capturedInterrupt.write(mBuf, 0, r)
-                        if (bargeFrames >= 4) {
-                            interrupted.set(true)
-                            runCatching { trk.pause(); trk.flush() }
-                            writerJob.cancel()
-                            break
-                        }
-                    } else { bargeFrames = 0; capturedInterrupt.reset() }
-                }
-            }
-        }
-
-        writerJob.join(); monitorJob.join()
-        runCatching { trk.stop(); trk.release() }; activePlayer = null
-        if (interrupted.get()) capturedInterrupt.toByteArray() else null
-    }
-
-    private fun sendVoiceTurnToCloudflare(wavBytes: ByteArray, history: List<ChatHistoryTurn>): String {
-        var conn: HttpsURLConnection? = null
-        return try {
-            val body = JSONObject().apply {
-                put("voice_mode", true)
-                put("audio_base64", Base64.encodeToString(wavBytes, Base64.NO_WRAP))
-                put("user_prompt", "Spoken audio turn")
-                put("current_datetime", DateTimeProvider.nowFormatted())
-                put("history", JSONArray().apply { history.takeLast(6).forEach { put(JSONObject().put("role", it.role).put("content", it.content)) } })
-            }.toString()
-            conn = (URL(BackendEndpoint.STREAM_ENDPOINT).openConnection() as HttpsURLConnection).apply {
-                requestMethod = "POST"; connectTimeout = 10000; readTimeout = 30000; doInput = true; doOutput = true
-                setRequestProperty("Content-Type", "application/json; charset=utf-8")
-            }
-            OutputStreamWriter(conn.outputStream, StandardCharsets.UTF_8).use { it.write(body); it.flush() }
-            val sb = StringBuilder()
-            BufferedReader(InputStreamReader(conn.inputStream, StandardCharsets.UTF_8)).use { r ->
-                var line: String?
-                while (r.readLine().also { line = it } != null) {
-                    val t = line!!.trim()
-                    if (t.equals("[Done]", true)) break
-                    sb.append(t.replace(Regex("""\[/?content\]|<[^>]+>"""), ""))
-                }
-            }
-            sb.toString().trim()
-        } catch (e: Exception) { "" } finally { conn?.disconnect() }
+        return ((sqrt(sum / samples) / 9500.0).toFloat()).coerceIn(0f, 1f)
     }
 
     fun stopVoiceEngine() {
         active = false
+        runCatching { ws?.close() }
         runCatching { aec?.release(); ns?.release() }
-        runCatching { activePlayer?.stop(); activePlayer?.release() }
+        runCatching { player?.stop(); player?.release() }
         runCatching { recorder?.stop(); recorder?.release() }
-        runCatching { ttsEngine?.stop(); ttsEngine?.shutdown() }
-        aec = null; ns = null; activePlayer = null; recorder = null; ttsEngine = null
+        ws = null; aec = null; ns = null; player = null; recorder = null
     }
 }
