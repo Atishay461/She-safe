@@ -46,7 +46,6 @@ class LiveVoiceStreamClient {
         onTranscriptTurn: (Boolean, String) -> Unit
     ) = withContext(Dispatchers.IO) {
         active = true; isMicMuted = false
-        // IMMEDIATELY enter Listening state on tap (Never stuck on Processing!)
         onStateChange(VoiceUiState.USER_LISTENING)
 
         ttsEngine = TextToSpeech(context.applicationContext) { status ->
@@ -67,7 +66,7 @@ class LiveVoiceStreamClient {
         val speechAccumulator = ByteArrayOutputStream()
         var hasSpoken = false
         var lastVoiceMs = System.currentTimeMillis()
-        var noiseFloor = 0.015f
+        var noiseFloor = 0.012f
 
         while (isActive && active) {
             val read = rec.read(micBuf, 0, micBuf.size)
@@ -76,11 +75,11 @@ class LiveVoiceStreamClient {
             val rawRms = if (isMicMuted) 0f else ExpressiveVoiceHelper.calcRms(frameCopy, 0, read)
 
             if (!hasSpoken && !isMicMuted) {
-                noiseFloor = (noiseFloor * 0.92f + rawRms * 0.08f).coerceIn(0.008f, 0.045f)
+                noiseFloor = (noiseFloor * 0.92f + rawRms * 0.08f).coerceIn(0.005f, 0.035f)
             }
-            val startThresh = (noiseFloor + 0.040f).coerceAtLeast(0.052f)
-            val sustainThresh = (noiseFloor + 0.015f).coerceAtLeast(0.024f)
-            val visualLevel = ((rawRms - noiseFloor).coerceAtLeast(0f) * 2.3f).coerceIn(0f, 1f)
+            val startThresh = (noiseFloor + 0.028f).coerceAtLeast(0.038f)
+            val sustainThresh = (noiseFloor + 0.012f).coerceAtLeast(0.020f)
+            val visualLevel = ((rawRms - noiseFloor).coerceAtLeast(0f) * 2.6f).coerceIn(0f, 1f)
             onInputLevel(if (isMicMuted) 0f else visualLevel)
             val now = System.currentTimeMillis()
 
@@ -98,8 +97,9 @@ class LiveVoiceStreamClient {
             }
 
             val silenceMs = now - lastVoiceMs
-            val shouldSend = hasSpoken && speechAccumulator.size() >= 20000 &&
-                    (silenceMs >= 1500L || speechAccumulator.size() >= 768000 || forceProcessTurn)
+            val shouldSend = (hasSpoken && speechAccumulator.size() >= 10000 &&
+                    (silenceMs >= 1100L || speechAccumulator.size() >= 512000)) ||
+                    (forceProcessTurn && speechAccumulator.size() > 3200)
 
             if (shouldSend) {
                 forceProcessTurn = false; hasSpoken = false; onInputLevel(0f)
@@ -114,13 +114,22 @@ class LiveVoiceStreamClient {
                         history.add(ChatHistoryTurn("model", cleanReply))
                         onTranscriptTurn(false, "<p>$cleanReply</p>")
                     }
-                    if (synthWav != null && active) {
+                    if (active && cleanReply.isNotBlank()) {
                         onStateChange(VoiceUiState.MODEL_SPEAKING)
-                        val interruptedAudio = playStaticZeroStutter(synthWav, rec, startThresh, onOutputLevel)
-                        onOutputLevel(0f)
-                        if (interruptedAudio != null && active) {
-                            hasSpoken = true; lastVoiceMs = System.currentTimeMillis()
-                            speechAccumulator.write(interruptedAudio)
+                        if (synthWav != null) {
+                            val interruptedAudio = runCatching {
+                                playStaticZeroStutter(synthWav, rec, startThresh, onOutputLevel)
+                            }.getOrElse {
+                                ExpressiveVoiceHelper.speakDirectlyWithVisualizer(ttsEngine, cleanReply, onOutputLevel)
+                                null
+                            }
+                            onOutputLevel(0f)
+                            if (interruptedAudio != null && active) {
+                                hasSpoken = true; lastVoiceMs = System.currentTimeMillis()
+                                speechAccumulator.write(interruptedAudio)
+                            }
+                        } else {
+                            ExpressiveVoiceHelper.speakDirectlyWithVisualizer(ttsEngine, cleanReply, onOutputLevel)
                         }
                     }
                 }
@@ -140,11 +149,10 @@ class LiveVoiceStreamClient {
         if (pcmLen <= 0) return@coroutineScope null
         val totalFrames = pcmLen / 2
 
-        // MODE_STATIC pre-loads entire audio into hardware buffer -> 0% stutter guaranteed
         val trk = AudioTrack.Builder()
             .setAudioAttributes(AudioAttributes.Builder().setUsage(AudioAttributes.USAGE_MEDIA).setContentType(AudioAttributes.CONTENT_TYPE_SPEECH).build())
             .setAudioFormat(AudioFormat.Builder().setEncoding(AudioFormat.ENCODING_PCM_16BIT).setSampleRate(sr).setChannelMask(AudioFormat.CHANNEL_OUT_MONO).build())
-            .setBufferSizeInBytes(pcmLen)
+            .setBufferSizeInBytes(pcmLen.coerceAtLeast(8192))
             .setTransferMode(AudioTrack.MODE_STATIC)
             .build()
 
@@ -166,10 +174,10 @@ class LiveVoiceStreamClient {
 
             val r = rec.read(mBuf, 0, mBuf.size)
             if (!isMicMuted && r > 0) {
-                if (ExpressiveVoiceHelper.calcRms(mBuf, 0, r) >= (bargeThreshold + 0.045f)) {
+                if (ExpressiveVoiceHelper.calcRms(mBuf, 0, r) >= (bargeThreshold + 0.055f)) {
                     bargeFrames++
                     capturedInterrupt.write(mBuf, 0, r)
-                    if (bargeFrames >= 4) {
+                    if (bargeFrames >= 5) {
                         interrupted.set(true)
                         runCatching { trk.pause(); trk.flush() }
                         break
@@ -194,7 +202,7 @@ class LiveVoiceStreamClient {
                 put("history", JSONArray().apply { history.takeLast(6).forEach { put(JSONObject().put("role", it.role).put("content", it.content)) } })
             }.toString()
             conn = (URL(BackendEndpoint.STREAM_ENDPOINT).openConnection() as HttpsURLConnection).apply {
-                requestMethod = "POST"; connectTimeout = 8000; readTimeout = 20000; doInput = true; doOutput = true
+                requestMethod = "POST"; connectTimeout = 10000; readTimeout = 25000; doInput = true; doOutput = true
                 setRequestProperty("Content-Type", "application/json; charset=utf-8")
             }
             OutputStreamWriter(conn.outputStream, StandardCharsets.UTF_8).use { it.write(body); it.flush() }
@@ -203,12 +211,16 @@ class LiveVoiceStreamClient {
                 var line: String?
                 while (r.readLine().also { line = it } != null) {
                     val t = line!!.trim()
-                    if (t.equals("[Done]", true)) break
-                    sb.append(t.replace(Regex("""\[/?content\]|<[^>]+>"""), ""))
+                    if (t.equals("[Done]", true) || t.equals("data: [Done]", true)) break
+                    sb.append(t.removePrefix("data:").replace(Regex("""\[/?content\]|<[^>]+>"""), ""))
                 }
             }
             sb.toString().trim()
-        } catch (e: Exception) { "" } finally { conn?.disconnect() }
+        } catch (e: Exception) {
+            "[TONE:SWEET] I am right here listening to you. Please tell me what is happening."
+        } finally {
+            conn?.disconnect()
+        }
     }
 
     fun stopVoiceEngine() {

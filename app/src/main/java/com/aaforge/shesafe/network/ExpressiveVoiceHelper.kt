@@ -5,12 +5,15 @@ import android.os.Bundle
 import android.speech.tts.TextToSpeech
 import android.speech.tts.UtteranceProgressListener
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.withTimeoutOrNull
 import java.io.ByteArrayOutputStream
 import java.io.File
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import java.util.Locale
+import kotlin.math.abs
+import kotlin.math.sin
 import kotlin.math.sqrt
 
 object ExpressiveVoiceHelper {
@@ -41,7 +44,7 @@ object ExpressiveVoiceHelper {
             val s = ((buf[i + 1].toInt() shl 8) or (buf[i].toInt() and 0xFF)).toShort().toDouble()
             sum += s * s; i += 2
         }
-        return ((sqrt(sum / samples) / 9000.0).toFloat()).coerceIn(0f, 1f)
+        return ((sqrt(sum / samples) / 7500.0).toFloat()).coerceIn(0f, 1f)
     }
 
     fun readWavSampleRate(wavBytes: ByteArray): Int {
@@ -62,28 +65,66 @@ object ExpressiveVoiceHelper {
         }
     }
 
-    suspend fun synthesizeExpressiveWav(context: Context, tts: TextToSpeech?, rawReply: String): Pair<String, ByteArray?> {
-        val engine = tts ?: return Pair(rawReply, null)
+    fun applyToneAndClean(tts: TextToSpeech?, rawReply: String): String {
         val upper = rawReply.uppercase()
-        when {
-            upper.contains("[TONE:URGENT]") -> {
-                engine.setPitch(1.12f)
-                engine.setSpeechRate(1.14f)
-            }
-            upper.contains("[TONE:DEEP]") -> {
-                engine.setPitch(0.91f)
-                engine.setSpeechRate(0.93f)
-            }
-            else -> {
-                engine.setPitch(1.05f)
-                engine.setSpeechRate(0.97f)
+        tts?.let { engine ->
+            when {
+                upper.contains("[TONE:URGENT]") -> {
+                    engine.setPitch(1.12f)
+                    engine.setSpeechRate(1.12f)
+                }
+                upper.contains("[TONE:DEEP]") -> {
+                    engine.setPitch(0.92f)
+                    engine.setSpeechRate(0.94f)
+                }
+                else -> {
+                    engine.setPitch(1.04f)
+                    engine.setSpeechRate(0.98f)
+                }
             }
         }
-
-        val cleanText = rawReply
+        return rawReply
             .replace(Regex("""\[TONE:[A-Z]+\]""", RegexOption.IGNORE_CASE), "")
             .replace(Regex("""<[^>]+>|\[/?content\]"""), "")
             .trim()
+    }
+
+    suspend fun speakDirectlyWithVisualizer(
+        tts: TextToSpeech?,
+        cleanText: String,
+        onOutputLevel: (Float) -> Unit
+    ) {
+        val engine = tts ?: return
+        if (cleanText.isBlank()) return
+        val doneDeferred = CompletableDeferred<Boolean>()
+        val uttId = "utt_direct_${System.currentTimeMillis()}"
+
+        engine.setOnUtteranceProgressListener(object : UtteranceProgressListener() {
+            override fun onStart(id: String?) {}
+            override fun onDone(id: String?) { doneDeferred.complete(true) }
+            @Deprecated("Deprecated") override fun onError(id: String?) { doneDeferred.complete(false) }
+            override fun onError(id: String?, code: Int) { doneDeferred.complete(false) }
+        })
+
+        if (engine.speak(cleanText, TextToSpeech.QUEUE_FLUSH, Bundle(), uttId) != TextToSpeech.SUCCESS) {
+            doneDeferred.complete(false)
+            return
+        }
+
+        var tick = 0
+        withTimeoutOrNull(18000L) {
+            while (!doneDeferred.isCompleted) {
+                onOutputLevel((0.35f + 0.45f * abs(sin(tick * 0.45))).toFloat())
+                tick++
+                delay(70L)
+            }
+        }
+        onOutputLevel(0f)
+    }
+
+    suspend fun synthesizeExpressiveWav(context: Context, tts: TextToSpeech?, rawReply: String): Pair<String, ByteArray?> {
+        val engine = tts ?: return Pair(rawReply, null)
+        val cleanText = applyToneAndClean(engine, rawReply)
         if (cleanText.isBlank()) return Pair("", null)
 
         val tempFile = File(context.cacheDir, "mella_expressive.wav")
@@ -98,13 +139,10 @@ object ExpressiveVoiceHelper {
             override fun onError(id: String?, code: Int) { deferred.complete(false) }
         })
 
-        val params = Bundle().apply {
-            putString("networkTts", "true")
-        }
-        if (engine.synthesizeToFile(cleanText, params, tempFile, uttId) != TextToSpeech.SUCCESS) {
+        if (engine.synthesizeToFile(cleanText, Bundle(), tempFile, uttId) != TextToSpeech.SUCCESS) {
             return Pair(cleanText, null)
         }
-        val ok = withTimeoutOrNull(9000L) { deferred.await() } ?: false
+        val ok = withTimeoutOrNull(5000L) { deferred.await() } ?: false
         val bytes = if (ok && tempFile.exists() && tempFile.length() > 44) tempFile.readBytes() else null
         return Pair(cleanText, bytes)
     }
